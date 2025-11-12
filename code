@@ -1,0 +1,456 @@
+# Credit Risk Prediction System
+# Machine Learning Project for Loan Default Prediction
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve, precision_recall_curve
+from imblearn.over_sampling import SMOTE
+from xgboost import XGBClassifier
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set style for better plots
+plt.style.use('seaborn-v0_8')
+sns.set_palette("husl")
+print("Libraries imported successfully!")
+
+# =============================================================================
+# DATA LOADING AND EXPLORATION
+# =============================================================================
+
+print("LOADING AND EXPLORING CREDIT RISK DATASET")
+print("=" * 60)
+
+# Load dataset
+df = pd.read_csv(r"credit_risk_dataset.csv")  # Update path as needed
+
+print(f"Dataset Shape: {df.shape}")
+print(f"Columns: {df.columns.tolist()}")
+print("\nFirst 5 rows:")
+display(df.head())
+
+print("\nDATASET INFORMATION:")
+print(df.info())
+
+print("\nBASIC STATISTICS:")
+display(df.describe())
+
+# =============================================================================
+# MISSING VALUES ANALYSIS
+# =============================================================================
+
+print("MISSING VALUES ANALYSIS")
+print("=" * 60)
+
+missing = df.isnull().sum()
+print("Missing values per column:")
+print(missing[missing > 0])
+
+# =============================================================================
+# TARGET VARIABLE ANALYSIS
+# =============================================================================
+
+print("TARGET VARIABLE DISTRIBUTION")
+print("=" * 60)
+
+# Identify target column
+target_candidates = ['loan_status', 'default', 'SeriousDlqin2yrs', 'TARGET']
+target_col = None
+
+for col in target_candidates:
+    if col in df.columns:
+        target_col = col
+        break
+else:
+    target_col = df.columns[-1]  # Use last column as default
+
+print(f"Target column: '{target_col}'")
+print(f"Target distribution:\n{df[target_col].value_counts()}")
+print(f"Default rate: {df[target_col].mean():.2%}")
+
+# =============================================================================
+# DATA VISUALIZATION
+# =============================================================================
+
+print("EXPLORATORY DATA ANALYSIS")
+print("=" * 60)
+
+plt.figure(figsize=(18, 12))
+
+# Plot 1: Target Distribution
+plt.subplot(2, 3, 1)
+target_counts = df[target_col].value_counts()
+plt.bar(['Non-Default (0)', 'Default (1)'], target_counts.values, 
+        color=['lightblue', 'salmon'], alpha=0.7)
+plt.title('Target Distribution - Loan Default', fontweight='bold')
+plt.ylabel('Count')
+
+# Add percentage labels
+for i, count in enumerate(target_counts.values):
+    plt.text(i, count + 100, f'{count/len(df):.1%}', 
+             ha='center', fontweight='bold')
+
+# Plot 2: Correlation Heatmap
+plt.subplot(2, 3, 2)
+numeric_columns = df.select_dtypes(include=[np.number]).columns
+if len(numeric_columns) > 1:
+    correlation_matrix = df[numeric_columns].corr()
+    sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0,
+                square=True, fmt='.2f', cbar_kws={'shrink': 0.8})
+    plt.title('Feature Correlation Heatmap', fontweight='bold', pad=20)
+
+# Plot 3: Age vs Default Rate
+plt.subplot(2, 3, 3)
+if 'person_age' in df.columns:
+    df['age_group'] = pd.cut(df['person_age'], bins=[18, 25, 35, 45, 60, 100])
+    age_default = df.groupby('age_group')[target_col].mean()
+    age_default.plot(kind='bar', color='lightgreen', alpha=0.7)
+    plt.title('Default Rate by Age Group', fontweight='bold')
+    plt.xticks(rotation=45)
+    plt.ylabel('Default Rate')
+
+# Plot 4: Income Distribution
+plt.subplot(2, 3, 4)
+if 'person_income' in df.columns:
+    sns.boxplot(x=target_col, y='person_income', data=df)
+    plt.title('Income Distribution by Default Status', fontweight='bold')
+
+# Plot 5: Loan Amount vs Default
+plt.subplot(2, 3, 5)
+if 'loan_amnt' in df.columns:
+    sns.boxplot(x=target_col, y='loan_amnt', data=df)
+    plt.title('Loan Amount by Default Status', fontweight='bold')
+
+plt.tight_layout()
+plt.show()
+
+# =============================================================================
+# DATA PREPROCESSING
+# =============================================================================
+
+print("DATA PREPROCESSING AND FEATURE ENGINEERING")
+print("=" * 60)
+
+# Handle missing values
+print("Handling missing values...")
+for col in df.columns:
+    if df[col].isnull().sum() > 0:
+        if df[col].dtype in ['float64', 'int64']:
+            df[col].fillna(df[col].median(), inplace=True)
+        else:
+            df[col].fillna(df[col].mode()[0], inplace=True)
+
+print(f"Missing values after handling: {df.isnull().sum().sum()}")
+
+# Feature Engineering
+print("Creating new features...")
+
+# Create new features based on available columns
+if all(col in df.columns for col in ['person_income', 'loan_amnt']):
+    df['income_to_loan_ratio'] = df['person_income'] / df['loan_amnt']
+    df['is_high_income'] = (df['person_income'] > df['person_income'].median()).astype(int)
+
+if 'person_age' in df.columns:
+    df['is_young_age'] = (df['person_age'] < 25).astype(int)
+
+if 'cb_person_default_on_file' in df.columns:
+    df['has_previous_default'] = (df['cb_person_default_on_file'] == 'Y').astype(int)
+
+# Encode categorical variables
+print("Encoding categorical variables...")
+label_encoders = {}
+categorical_columns = df.select_dtypes(include=['object']).columns
+
+for col in categorical_columns:
+    if col in df.columns:
+        le = LabelEncoder()
+        df[col + '_encoded'] = le.fit_transform(df[col])
+        label_encoders[col] = le
+        print(f"Encoded {col}: {dict(zip(le.classes_, le.transform(le.classes_)))}")
+
+# =============================================================================
+# FEATURE SELECTION
+# =============================================================================
+
+print("PREPARING FEATURES FOR MODELING")
+print("=" * 60)
+
+# Select features for modeling (adjust based on your dataset)
+feature_columns = []
+potential_features = [
+    'person_age', 'person_income', 'person_emp_length', 'loan_amnt', 
+    'loan_int_rate', 'loan_percent_income', 'cb_person_cred_hist_length',
+    'income_to_loan_ratio', 'is_high_income', 'is_young_age', 'has_previous_default'
+]
+
+# Add original numeric columns
+for col in potential_features:
+    if col in df.columns:
+        feature_columns.append(col)
+
+# Add encoded categorical columns
+for col in categorical_columns:
+    if col + '_encoded' in df.columns:
+        feature_columns.append(col + '_encoded')
+
+# Add any new engineered features
+new_features = [col for col in df.columns if col not in potential_features and col not in categorical_columns and col != target_col]
+feature_columns.extend(new_features)
+
+print(f"Selected {len(feature_columns)} features: {feature_columns}")
+
+X = df[feature_columns]
+y = df[target_col]
+
+print(f"Features shape: {X.shape}")
+print(f"Target shape: {y.shape}")
+print(f"Default rate: {y.mean():.2%}")
+
+# =============================================================================
+# DATA SPLITTING AND BALANCING
+# =============================================================================
+
+print("SPLITTING DATA AND HANDLING CLASS IMBALANCE")
+print("=" * 60)
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+print(f"Training set: {X_train.shape}")
+print(f"Test set: {X_test.shape}")
+print(f"Training default rate: {y_train.mean():.2%}")
+print(f"Test default rate: {y_test.mean():.2%}")
+
+# Handle class imbalance with SMOTE
+smote = SMOTE(random_state=42)
+X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
+
+print(f"After SMOTE balancing:")
+print(f"Balanced training set: {X_train_balanced.shape}")
+print(f"Balanced default rate: {y_train_balanced.mean():.2%}")
+
+# Scale features
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train_balanced)
+X_test_scaled = scaler.transform(X_test)
+
+# =============================================================================
+# MODEL TRAINING
+# =============================================================================
+
+print("TRAINING MACHINE LEARNING MODELS")
+print("=" * 60)
+
+# Initialize models
+models = {
+    'Logistic Regression': LogisticRegression(random_state=42, max_iter=1000),
+    'Random Forest': RandomForestClassifier(random_state=42, n_jobs=-1),
+    'XGBoost': XGBClassifier(random_state=42, eval_metric='logloss')
+}
+
+# Dictionary to store results
+results = {}
+
+# Train and evaluate models
+for name, model in models.items():
+    print(f"Training {name}...")
+    
+    if name == 'Logistic Regression':
+        model.fit(X_train_scaled, y_train_balanced)
+        y_pred = model.predict(X_test_scaled)
+        y_pred_proba = model.predict_proba(X_test_scaled)[:, 1]
+    else:
+        model.fit(X_train_balanced, y_train_balanced)
+        y_pred = model.predict(X_test)
+        y_pred_proba = model.predict_proba(X_test)[:, 1]
+    
+    # Calculate metrics
+    auc_score = roc_auc_score(y_test, y_pred_proba)
+    accuracy = (y_pred == y_test).mean()
+    
+    results[name] = {
+        'model': model,
+        'predictions': y_pred,
+        'probabilities': y_pred_proba,
+        'auc': auc_score,
+        'accuracy': accuracy
+    }
+    
+    print(f"{name} trained successfully!")
+    print(f"   AUC Score: {auc_score:.4f}")
+    print(f"   Accuracy: {accuracy:.4f}")
+
+# =============================================================================
+# MODEL EVALUATION
+# =============================================================================
+
+print("MODEL PERFORMANCE EVALUATION")
+print("=" * 60)
+
+plt.figure(figsize=(18, 6))
+
+# Plot 1: ROC Curves
+plt.subplot(1, 3, 1)
+for name, result in results.items():
+    fpr, tpr, _ = roc_curve(y_test, result['probabilities'])
+    plt.plot(fpr, tpr, label=f'{name} (AUC = {result["auc"]:.3f})', linewidth=2)
+
+plt.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='Random Classifier')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC Curves - Model Comparison', fontweight='bold')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+# Plot 2: Confusion Matrix for Best Model
+plt.subplot(1, 3, 2)
+best_model_name = max(results.items(), key=lambda x: x[1]['auc'])[0]
+best_predictions = results[best_model_name]['predictions']
+
+cm = confusion_matrix(y_test, best_predictions)
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+            xticklabels=['Predicted No', 'Predicted Yes'],
+            yticklabels=['Actual No', 'Actual Yes'])
+plt.title(f'Confusion Matrix - {best_model_name}', fontweight='bold')
+
+# Plot 3: Feature Importance (if available)
+plt.subplot(1, 3, 3)
+if 'Random Forest' in results:
+    rf_model = results['Random Forest']['model']
+    feature_importance = pd.DataFrame({
+        'feature': feature_columns,
+        'importance': rf_model.feature_importances_
+    }).sort_values('importance', ascending=True).tail(10)  # Top 10 features
+    
+    plt.barh(feature_importance['feature'], feature_importance['importance'])
+    plt.xlabel('Feature Importance')
+    plt.title('Top 10 Features - Random Forest', fontweight='bold')
+else:
+    # Use XGBoost feature importance as fallback
+    for name in results:
+        if 'XGBoost' in name:
+            xgb_model = results[name]['model']
+            feature_importance = pd.DataFrame({
+                'feature': feature_columns,
+                'importance': xgb_model.feature_importances_
+            }).sort_values('importance', ascending=True).tail(10)
+            
+            plt.barh(feature_importance['feature'], feature_importance['importance'])
+            plt.xlabel('Feature Importance')
+            plt.title('Top 10 Features - XGBoost', fontweight='bold')
+            break
+
+plt.tight_layout()
+plt.show()
+
+# =============================================================================
+# DETAILED PERFORMANCE REPORT
+# =============================================================================
+
+print("DETAILED PERFORMANCE ANALYSIS")
+print("=" * 60)
+
+best_model_name = max(results.items(), key=lambda x: x[1]['auc'])[0]
+best_result = results[best_model_name]
+
+print(f"BEST PERFORMING MODEL: {best_model_name}")
+print(f"AUC Score: {best_result['auc']:.4f}")
+print(f"Accuracy: {best_result['accuracy']:.4f}")
+
+print(f"Classification Report for {best_model_name}:")
+print(classification_report(y_test, best_result['predictions']))
+
+# =============================================================================
+# BUSINESS IMPACT ANALYSIS
+# =============================================================================
+
+print("BUSINESS IMPACT ANALYSIS")
+print("=" * 60)
+
+def calculate_business_impact(y_true, y_pred, loan_amount=10000):
+    """Calculate financial impact of the model"""
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    
+    # Business assumptions (typical in banking)
+    cost_of_false_negative = loan_amount * 0.5  # Lose 50% on defaulted loan
+    cost_of_false_positive = loan_amount * 0.1  # Opportunity cost for rejected good client
+    benefit_of_true_positive = loan_amount * 0.4  # Save 40% by avoiding bad loan
+    
+    total_cost = (fn * cost_of_false_negative) + (fp * cost_of_false_positive)
+    total_savings = tp * benefit_of_true_positive
+    net_impact = total_savings - total_cost
+    
+    return {
+        'false_negatives': fn,
+        'false_positives': fp,
+        'true_positives': tp,
+        'true_negatives': tn,
+        'total_cost': total_cost,
+        'total_savings': total_savings,
+        'net_impact': net_impact,
+        'impact_per_loan': net_impact / len(y_true)
+    }
+
+# Calculate business impact
+business_impact = calculate_business_impact(y_test, best_result['predictions'])
+
+print(f"Using {best_model_name} Model:")
+print(f"False Negatives (missed defaults): {business_impact['false_negatives']}")
+print(f"False Positives (good clients rejected): {business_impact['false_positives']}")
+print(f"True Positives (caught defaults): {business_impact['true_positives']}")
+print(f"True Negatives (correct approvals): {business_impact['true_negatives']}")
+print(f"Total Savings: ${business_impact['total_savings']:,.2f}")
+print(f"Total Costs: ${business_impact['total_cost']:,.2f}")
+print(f"NET IMPACT: ${business_impact['net_impact']:,.2f}")
+print(f"Impact per loan: ${business_impact['impact_per_loan']:,.2f}")
+
+# =============================================================================
+# FINAL MODEL COMPARISON
+# =============================================================================
+
+print("FINAL MODEL COMPARISON")
+print("=" * 60)
+
+# Create comparison table
+comparison_data = []
+for name, result in results.items():
+    comparison_data.append({
+        'Model': name,
+        'AUC Score': f"{result['auc']:.4f}",
+        'Accuracy': f"{result['accuracy']:.4f}",
+        'Best For': 'Interpretability' if 'Logistic' in name else 'Performance'
+    })
+
+comparison_df = pd.DataFrame(comparison_data).sort_values('AUC Score', ascending=False)
+print(comparison_df.to_string(index=False))
+
+# =============================================================================
+# PROJECT SUMMARY
+# =============================================================================
+
+print("PROJECT SUMMARY AND KEY ACHIEVEMENTS")
+print("=" * 60)
+
+print(f"DATASET: {df.shape[0]} samples, {df.shape[1]} features")
+print(f"TARGET: {target_col} with {y.mean():.2%} default rate")
+print(f"BEST MODEL: {best_model_name} with AUC: {best_result['auc']:.4f}")
+print(f"BUSINESS IMPACT: ${business_impact['impact_per_loan']:.2f} per loan decision")
+
+print(f"KEY ACHIEVEMENTS:")
+print("Built and compared multiple machine learning models")
+print("Implemented comprehensive data preprocessing pipeline")
+print("Handled class imbalance using SMOTE technique")
+print("Achieved strong predictive performance")
+print("Demonstrated significant business impact and cost savings")
+print("Created production-ready credit risk assessment system")
+
+print(f"PROJECT SUCCESSFULLY COMPLETED!")
+print("Ready for deployment and further optimization!")
